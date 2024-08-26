@@ -7,7 +7,7 @@ on: push
 name: OpenOCD Snapshot
 
 jobs:
-  package:
+  package_win32:
     runs-on: [ubuntu-20.04]
     env:
       DL_DIR: ../downloads
@@ -15,8 +15,12 @@ jobs:
     steps:
       - name: Install needed packages
         run: |
+          sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install autotools-dev autoconf automake libtool pkg-config cmake texinfo texlive g++-mingw-w64-i686
+          sudo apt-get install curl git build-essential libudev-dev
+          sudo apt-get install gcc-i686-linux-gnu g++-i686-linux-gnu pkg-config-i686-linux-gnu libudev-dev:i386
+          sudo apt-get install mingw-w64 mingw-w64-tools
       - name: Checkout Code
         uses: actions/checkout@v1
       - run: ./bootstrap
@@ -69,7 +73,7 @@ jobs:
       - name: Package OpenOCD for windows
         env:
           MAKE_JOBS: 2
-          HOST: i686-w64-mingw32
+          HOST: ${{ matrix.HOST }}
           LIBUSB1_CONFIG: --enable-shared --disable-static
           HIDAPI_CONFIG: --enable-shared --disable-static --disable-testgui
           LIBFTDI_CONFIG: -DSTATICLIBS=OFF -DEXAMPLES=OFF -DFTDI_EEPROM=OFF
@@ -105,6 +109,75 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           path: ${{ env.ARTIFACT_PATH }}
+  package_linux:
+    strategy:
+      matrix:
+        HOST: [x86_64-linux-gnu, i686-linux-gnu]
+    runs-on: [ubuntu-20.04]
+    env:
+      DL_DIR: ../downloads
+    steps:
+      - name: Install needed packages
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install curl git build-essential libtool pkg-config automake autoconf libudev-dev
+          sudo apt-get install gcc-i686-linux-gnu g++-i686-linux-gnu pkg-config-i686-linux-gnu libudev-dev:i386
+          sudo apt-get install mingw-w64 mingw-w64-tools
+      - name: Checkout Code
+        uses: actions/checkout@v1
+      - run: ./bootstrap
+      - name: Prepare libusb1
+        env:
+          LIBUSB1_VER: 1.0.26
+        run: |
+          mkdir -p $DL_DIR && cd $DL_DIR
+          wget "https://github.com/libusb/libusb/releases/download/v${LIBUSB1_VER}/libusb-${LIBUSB1_VER}.tar.bz2"
+          tar -xjf libusb-${LIBUSB1_VER}.tar.bz2
+          echo "LIBUSB1_SRC=$PWD/libusb-${LIBUSB1_VER}" >> $GITHUB_ENV
+      - name: Package OpenOCD for linux
+        env:
+          MAKE_JOBS: 2
+          HOST: ${{ matrix.HOST }}
+          BUILD_DIR: ../build-${{ matrix.HOST }}
+          LIBUSB1_CONFIG: --enable-shared --disable-static
+        run: |
+          # check if there is tag pointing at HEAD, otherwise take the HEAD SHA-1 as OPENOCD_TAG
+          OPENOCD_TAG="`git tag --points-at HEAD`"
+          [ -z $OPENOCD_TAG ] && OPENOCD_TAG="`git rev-parse --short HEAD`"
+          # check if there is tag pointing at HEAD, if so the release will have the same name as the tag,
+          # otherwise it will be named 'latest'
+          RELEASE_NAME="`git tag --points-at HEAD`"
+          [ -z $RELEASE_NAME ] && RELEASE_NAME="latest"
+          [[ $RELEASE_NAME = "latest" ]] && IS_PRE_RELEASE="true" || IS_PRE_RELEASE="false"
+          # set env and call cross-build.sh
+          export OPENOCD_TAG=$OPENOCD_TAG
+          export OPENOCD_SRC=$PWD
+          export OPENOCD_CONFIG=""
+          mkdir -p $BUILD_DIR &&  cd $BUILD_DIR
+          bash $OPENOCD_SRC/contrib/cross-build.sh $HOST
+          # prepare the artifact
+          ARTIFACT="openocd-${OPENOCD_TAG}-${HOST}.tar.gz"
+          tar -czf $ARTIFACT *
+          echo "RELEASE_NAME=$RELEASE_NAME" >> $GITHUB_ENV
+          echo "IS_PRE_RELEASE=$IS_PRE_RELEASE" >> $GITHUB_ENV
+          echo "ARTIFACT_PATH=$PWD/$ARTIFACT" >> $GITHUB_ENV
+      - name: Publish OpenOCD packaged for linux
+        uses: actions/upload-artifact@v4
+        with:
+          path: ${{ env.ARTIFACT_PATH }}
+  deploy:
+    needs: [package_win32, package_linux]
+    runs-on: [ubuntu-20.04]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v1
+      - name: Package OpenOCD for windows
+        run: |
+          RELEASE_NAME="`git tag --points-at HEAD`"
+          [ -z $RELEASE_NAME ] && RELEASE_NAME="latest"
+          [[ $RELEASE_NAME = "latest" ]] && IS_PRE_RELEASE="true" || IS_PRE_RELEASE="false"
+          echo "RELEASE_NAME=$RELEASE_NAME" >> $GITHUB_ENV
       - name: Delete 'latest' Release
         uses: dev-drprasad/delete-tag-and-release@v0.2.1
         with:

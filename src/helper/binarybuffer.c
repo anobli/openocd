@@ -40,7 +40,7 @@ static const char hex_digits[] = {
 	'a', 'b', 'c', 'd', 'e', 'f'
 };
 
-void *buf_cpy(const void *from, void *_to, unsigned size)
+void *buf_cpy(const void *from, void *_to, unsigned int size)
 {
 	if (!from || !_to)
 		return NULL;
@@ -49,7 +49,7 @@ void *buf_cpy(const void *from, void *_to, unsigned size)
 	memcpy(_to, from, DIV_ROUND_UP(size, 8));
 
 	/* mask out bits that don't belong to the buffer */
-	unsigned trailing_bits = size % 8;
+	unsigned int trailing_bits = size % 8;
 	if (trailing_bits) {
 		uint8_t *to = _to;
 		to[size / 8] &= (1 << trailing_bits) - 1;
@@ -57,52 +57,52 @@ void *buf_cpy(const void *from, void *_to, unsigned size)
 	return _to;
 }
 
-static bool buf_cmp_masked(uint8_t a, uint8_t b, uint8_t m)
+static bool buf_eq_masked(uint8_t a, uint8_t b, uint8_t m)
 {
-	return (a & m) != (b & m);
+	return (a & m) == (b & m);
 }
-static bool buf_cmp_trailing(uint8_t a, uint8_t b, uint8_t m, unsigned trailing)
+static bool buf_eq_trailing(uint8_t a, uint8_t b, uint8_t m, unsigned int trailing)
 {
 	uint8_t mask = (1 << trailing) - 1;
-	return buf_cmp_masked(a, b, mask & m);
+	return buf_eq_masked(a, b, mask & m);
 }
 
-bool buf_cmp(const void *_buf1, const void *_buf2, unsigned size)
+bool buf_eq(const void *_buf1, const void *_buf2, unsigned int size)
 {
 	if (!_buf1 || !_buf2)
-		return _buf1 != _buf2;
+		return _buf1 == _buf2;
 
-	unsigned last = size / 8;
+	unsigned int last = size / 8;
 	if (memcmp(_buf1, _buf2, last) != 0)
 		return false;
 
-	unsigned trailing = size % 8;
+	unsigned int trailing = size % 8;
 	if (!trailing)
-		return false;
+		return true;
 
 	const uint8_t *buf1 = _buf1, *buf2 = _buf2;
-	return buf_cmp_trailing(buf1[last], buf2[last], 0xff, trailing);
+	return buf_eq_trailing(buf1[last], buf2[last], 0xff, trailing);
 }
 
-bool buf_cmp_mask(const void *_buf1, const void *_buf2,
-	const void *_mask, unsigned size)
+bool buf_eq_mask(const void *_buf1, const void *_buf2,
+	const void *_mask, unsigned int size)
 {
 	if (!_buf1 || !_buf2)
-		return _buf1 != _buf2 || _buf1 != _mask;
+		return _buf1 == _buf2 && _buf1 == _mask;
 
 	const uint8_t *buf1 = _buf1, *buf2 = _buf2, *mask = _mask;
-	unsigned last = size / 8;
-	for (unsigned i = 0; i < last; i++) {
-		if (buf_cmp_masked(buf1[i], buf2[i], mask[i]))
-			return true;
+	unsigned int last = size / 8;
+	for (unsigned int i = 0; i < last; i++) {
+		if (!buf_eq_masked(buf1[i], buf2[i], mask[i]))
+			return false;
 	}
-	unsigned trailing = size % 8;
+	unsigned int trailing = size % 8;
 	if (!trailing)
-		return false;
-	return buf_cmp_trailing(buf1[last], buf2[last], mask[last], trailing);
+		return true;
+	return buf_eq_trailing(buf1[last], buf2[last], mask[last], trailing);
 }
 
-void *buf_set_ones(void *_buf, unsigned size)
+void *buf_set_ones(void *_buf, unsigned int size)
 {
 	uint8_t *buf = _buf;
 	if (!buf)
@@ -110,19 +110,19 @@ void *buf_set_ones(void *_buf, unsigned size)
 
 	memset(buf, 0xff, size / 8);
 
-	unsigned trailing_bits = size % 8;
+	unsigned int trailing_bits = size % 8;
 	if (trailing_bits)
 		buf[size / 8] = (1 << trailing_bits) - 1;
 
 	return buf;
 }
 
-void *buf_set_buf(const void *_src, unsigned src_start,
-	void *_dst, unsigned dst_start, unsigned len)
+void *buf_set_buf(const void *_src, unsigned int src_start,
+	void *_dst, unsigned int dst_start, unsigned int len)
 {
 	const uint8_t *src = _src;
 	uint8_t *dst = _dst;
-	unsigned i, sb, db, sq, dq, lb, lq;
+	unsigned int i, sb, db, sq, dq, lb, lq;
 
 	sb = src_start / 8;
 	db = dst_start / 8;
@@ -175,13 +175,13 @@ uint32_t flip_u32(uint32_t value, unsigned int num)
 	return c;
 }
 
-char *buf_to_hex_str(const void *_buf, unsigned buf_len)
+char *buf_to_hex_str(const void *_buf, unsigned int buf_len)
 {
-	unsigned len_bytes = DIV_ROUND_UP(buf_len, 8);
+	unsigned int len_bytes = DIV_ROUND_UP(buf_len, 8);
 	char *str = calloc(len_bytes * 2 + 1, 1);
 
 	const uint8_t *buf = _buf;
-	for (unsigned i = 0; i < len_bytes; i++) {
+	for (unsigned int i = 0; i < len_bytes; i++) {
 		uint8_t tmp = buf[len_bytes - i - 1];
 		if ((i == 0) && (buf_len % 8))
 			tmp &= (0xff >> (8 - (buf_len % 8)));
@@ -192,50 +192,12 @@ char *buf_to_hex_str(const void *_buf, unsigned buf_len)
 	return str;
 }
 
-static bool str_has_hex_prefix(const char *s)
-{
-	/* Starts with "0x" or "0X" */
-	return (s[0] == '0') && (s[1] == 'x' || s[1] == 'X');
-}
-
-static bool str_has_octal_prefix(const char *s)
-{
-	/* - starts with '0',
-	 * - has at least two characters, and
-	 * - the second character is not 'x' or 'X' */
-	return (s[0] == '0') && (s[1] != '\0') && (s[1] != 'x') && (s[1] != 'X');
-}
-
-/**
- * Try to identify the radix of the number by looking at its prefix.
- * No further validation of the number is preformed.
+/*
+ * TCL standard prefix is '0b', '0o', '0d' or '0x' respectively for binary,
+ * octal, decimal or hexadecimal.
+ * The prefix '0' is interpreted by TCL <= 8.6 as octal, but is ignored and
+ * interpreted as part of a decimal number by JimTCL and by TCL >= 9.
  */
-static unsigned int str_radix_guess(const char *str)
-{
-	if (str_has_hex_prefix(str))
-		return 16;
-
-	if (str_has_octal_prefix(str))
-		return 8;
-
-	/* Otherwise assume a decimal number. */
-	return 10;
-}
-
-/** Strip leading "0x" or "0X" from hex numbers or "0" from octal numbers. */
-static const char *str_strip_number_prefix(const char *str, unsigned int radix)
-{
-	switch (radix) {
-	case 16:
-		return str + 2;
-	case 8:
-		return str + 1;
-	case 10:
-	default:
-		return str;
-	}
-}
-
 int str_to_buf(const char *str, void *_buf, unsigned int buf_bitsize)
 {
 	assert(str);
@@ -243,9 +205,34 @@ int str_to_buf(const char *str, void *_buf, unsigned int buf_bitsize)
 	assert(buf_bitsize > 0);
 
 	uint8_t *buf = _buf;
-	unsigned int radix = str_radix_guess(str);
+	unsigned int radix = 10; /* default when no prefix */
 
-	str = str_strip_number_prefix(str, radix);
+	if (str[0] == '0') {
+		switch (str[1]) {
+		case 'b':
+		case 'B':
+			radix = 2;
+			str += 2;
+			break;
+		case 'o':
+		case 'O':
+			radix = 8;
+			str += 2;
+			break;
+		case 'd':
+		case 'D':
+			radix = 10;
+			str += 2;
+			break;
+		case 'x':
+		case 'X':
+			radix = 16;
+			str += 2;
+			break;
+		default:
+			break;
+		}
+	}
 
 	const size_t str_len = strlen(str);
 	if (str_len == 0)
@@ -302,8 +289,8 @@ void bit_copy_queue_init(struct bit_copy_queue *q)
 	INIT_LIST_HEAD(&q->list);
 }
 
-int bit_copy_queued(struct bit_copy_queue *q, uint8_t *dst, unsigned dst_offset, const uint8_t *src,
-	unsigned src_offset, unsigned bit_count)
+int bit_copy_queued(struct bit_copy_queue *q, uint8_t *dst, unsigned int dst_offset, const uint8_t *src,
+	unsigned int src_offset, unsigned int bit_count)
 {
 	struct bit_copy_queue_entry *qe = malloc(sizeof(*qe));
 	if (!qe)
@@ -408,12 +395,12 @@ size_t hexify(char *hex, const uint8_t *bin, size_t count, size_t length)
 	return i;
 }
 
-void buffer_shr(void *_buf, unsigned buf_len, unsigned count)
+void buffer_shr(void *_buf, unsigned int buf_len, unsigned int count)
 {
-	unsigned i;
+	unsigned int i;
 	unsigned char *buf = _buf;
-	unsigned bytes_to_remove;
-	unsigned shift;
+	unsigned int bytes_to_remove;
+	unsigned int shift;
 
 	bytes_to_remove = count / 8;
 	shift = count - (bytes_to_remove * 8);

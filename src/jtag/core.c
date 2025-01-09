@@ -51,6 +51,8 @@ static void jtag_add_scan_check(struct jtag_tap *active,
 		tap_state_t state),
 		int in_num_fields, struct scan_field *in_fields, tap_state_t state);
 
+static int jtag_error_clear(void);
+
 /**
  * The jtag_error variable is set when an error occurs while executing
  * the queue.  Application code may set this using jtag_set_error(),
@@ -127,7 +129,11 @@ void jtag_set_error(int error)
 	jtag_error = error;
 }
 
-int jtag_error_clear(void)
+/**
+ * Resets jtag_error to ERROR_OK, returning its previous value.
+ * @returns The previous value of @c jtag_error.
+ */
+static int jtag_error_clear(void)
 {
 	int temp = jtag_error;
 	jtag_error = ERROR_OK;
@@ -186,7 +192,7 @@ struct jtag_tap *jtag_all_taps(void)
 	return __jtag_all_taps;
 };
 
-unsigned int jtag_tap_count(void)
+static unsigned int jtag_tap_count(void)
 {
 	struct jtag_tap *t = jtag_all_taps();
 	unsigned int n = 0;
@@ -224,7 +230,7 @@ static void jtag_tap_add(struct jtag_tap *t)
 }
 
 /* returns a pointer to the n-th device in the scan chain */
-struct jtag_tap *jtag_tap_by_position(unsigned n)
+struct jtag_tap *jtag_tap_by_position(unsigned int n)
 {
 	struct jtag_tap *t = jtag_all_taps();
 
@@ -246,7 +252,7 @@ struct jtag_tap *jtag_tap_by_string(const char *s)
 	}
 
 	/* no tap found by name, so try to parse the name as a number */
-	unsigned n;
+	unsigned int n;
 	if (parse_uint(s, &n) != ERROR_OK)
 		return NULL;
 
@@ -881,9 +887,9 @@ static int jtag_check_value_inner(uint8_t *captured, uint8_t *in_check_value,
 	int compare_failed;
 
 	if (in_check_mask)
-		compare_failed = buf_cmp_mask(captured, in_check_value, in_check_mask, num_bits);
+		compare_failed = !buf_eq_mask(captured, in_check_value, in_check_mask, num_bits);
 	else
-		compare_failed = buf_cmp(captured, in_check_value, num_bits);
+		compare_failed = !buf_eq(captured, in_check_value, num_bits);
 
 	if (compare_failed) {
 		char *captured_str, *in_check_value_str;
@@ -1473,10 +1479,9 @@ void jtag_tap_init(struct jtag_tap *tap)
 	jtag_tap_add(tap);
 
 	LOG_DEBUG("Created Tap: %s @ abs position %u, "
-			"irlen %u, capture: 0x%x mask: 0x%x", tap->dotted_name,
+			"irlen %u, capture: 0x%" PRIx32 " mask: 0x%" PRIx32, tap->dotted_name,
 			tap->abs_chain_position, tap->ir_length,
-			(unsigned) tap->ir_capture_value,
-			(unsigned) tap->ir_capture_mask);
+			tap->ir_capture_value, tap->ir_capture_mask);
 }
 
 void jtag_tap_free(struct jtag_tap *tap)

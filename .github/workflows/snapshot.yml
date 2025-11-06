@@ -8,7 +8,7 @@ on: push
 name: OpenOCD Snapshot
 
 jobs:
-  package:
+  package_win32:
     runs-on: [ubuntu-latest]
     env:
       DL_DIR: ../downloads
@@ -16,12 +16,8 @@ jobs:
     steps:
       - name: Install needed packages
         run: |
-          sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install autotools-dev autoconf automake libtool pkg-config cmake texinfo texlive g++-mingw-w64-i686
-          sudo apt-get install curl git build-essential libudev-dev
-          sudo apt-get install gcc-i686-linux-gnu g++-i686-linux-gnu pkg-config-i686-linux-gnu libudev-dev:i386
-          sudo apt-get install mingw-w64 mingw-w64-tools
       - name: Checkout Code
         uses: actions/checkout@v4
       - run: ./bootstrap
@@ -82,7 +78,7 @@ jobs:
       - name: Package OpenOCD for windows
         env:
           MAKE_JOBS: 2
-          HOST: ${{ matrix.HOST }}
+          HOST: i686-w64-mingw32
           LIBUSB1_CONFIG: --enable-shared --disable-static
           HIDAPI_CONFIG: --enable-shared --disable-static --disable-testgui
           LIBFTDI_CONFIG: -DSTATICLIBS=OFF -DEXAMPLES=OFF -DFTDI_EEPROM=OFF
@@ -122,8 +118,8 @@ jobs:
   package_linux:
     strategy:
       matrix:
-        HOST: [x86_64-linux-gnu, i686-linux-gnu]
-    runs-on: [ubuntu-20.04]
+        HOST: [x86_64-linux-gnu]
+    runs-on: [ubuntu-latest]
     env:
       DL_DIR: ../downloads
     steps:
@@ -131,26 +127,16 @@ jobs:
         run: |
           sudo dpkg --add-architecture i386
           sudo apt-get update
-          sudo apt-get install curl git build-essential libtool pkg-config automake autoconf libudev-dev
-          sudo apt-get install gcc-i686-linux-gnu g++-i686-linux-gnu pkg-config-i686-linux-gnu libudev-dev:i386
-          sudo apt-get install mingw-w64 mingw-w64-tools
+          sudo apt-get install -y curl git build-essential libtool pkg-config automake autoconf
+          sudo apt-get install -y libudev-dev libftdi1-dev libusb-1.0-0-dev libhidapi-dev libjim-dev
       - name: Checkout Code
         uses: actions/checkout@v1
       - run: ./bootstrap
-      - name: Prepare libusb1
-        env:
-          LIBUSB1_VER: 1.0.26
-        run: |
-          mkdir -p $DL_DIR && cd $DL_DIR
-          wget "https://github.com/libusb/libusb/releases/download/v${LIBUSB1_VER}/libusb-${LIBUSB1_VER}.tar.bz2"
-          tar -xjf libusb-${LIBUSB1_VER}.tar.bz2
-          echo "LIBUSB1_SRC=$PWD/libusb-${LIBUSB1_VER}" >> $GITHUB_ENV
       - name: Package OpenOCD for linux
         env:
           MAKE_JOBS: 2
           HOST: ${{ matrix.HOST }}
           BUILD_DIR: ../build-${{ matrix.HOST }}
-          LIBUSB1_CONFIG: --enable-shared --disable-static
         run: |
           # check if there is tag pointing at HEAD, otherwise take the HEAD SHA-1 as OPENOCD_TAG
           OPENOCD_TAG="`git tag --points-at HEAD`"
@@ -175,6 +161,7 @@ jobs:
       - name: Publish OpenOCD packaged for linux
         uses: actions/upload-artifact@v4
         with:
+          name: ${{ matrix.HOST }}
           path: ${{ env.ARTIFACT_PATH }}
   deploy:
     needs: [package_win32, package_linux]

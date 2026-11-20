@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-# Periodically build upstream OpenOCD (openocd-org/openocd master) for Linux
-# and publish the result as a rolling "nightly" pre-release of this repository.
+# Build upstream OpenOCD (openocd-org/openocd master) for Linux every week.
+# Each build is published as a permanent release named after its version
+# and as the rolling "weekly" pre-release of this repository.
 #
 # Scheduled workflows only run from the repository's default branch.
 
-name: OpenOCD Linux nightly
+name: OpenOCD Linux weekly
 
 on:
   schedule:
-    - cron: '17 3 * * *'   # daily; use e.g. '17 3 * * 1' for weekly (Monday)
+    - cron: '17 3 * * 1'   # weekly, Monday 03:17 UTC
   workflow_dispatch:
     inputs:
       ref:
@@ -26,12 +27,12 @@ permissions:
   actions: write    # keep the schedule from being auto-disabled
 
 concurrency:
-  group: linux-nightly
+  group: linux-weekly
   cancel-in-progress: false
 
 env:
   UPSTREAM: openocd-org/openocd
-  RELEASE_TAG: nightly
+  RELEASE_TAG: weekly
 
 jobs:
   check:
@@ -74,7 +75,7 @@ jobs:
         if: github.event_name == 'schedule'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/linux-nightly.yml/enable" || true
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/linux-weekly.yml/enable" || true
 
   build:
     needs: check
@@ -137,24 +138,25 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Publish '${{ env.RELEASE_TAG }}' release
+      - name: Prepare release files
         env:
-          GH_TOKEN: ${{ github.token }}
           SHA: ${{ needs.check.outputs.sha }}
         run: |
           cd dist
           version=$(ls openocd-*-x86_64-linux.tar.gz | sed -E 's/^openocd-(.*)-x86_64-linux\.tar\.gz$/\1/')
-          # Also provide stable file names, so that
-          #   .../releases/download/nightly/openocd-<arch>-linux.tar.gz
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          # Stable file names for the rolling release, so that
+          #   .../releases/download/weekly/openocd-<arch>-linux.tar.gz
           # always points at the latest build.
+          mkdir -p ../rolling
           for f in openocd-*-linux.tar.gz; do
             arch=$(echo "$f" | sed -E 's/.*-([^-]+)-linux\.tar\.gz$/\1/')
-            cp "$f" "openocd-$arch-linux.tar.gz"
-            sha256sum "openocd-$arch-linux.tar.gz" > "openocd-$arch-linux.tar.gz.sha256"
+            cp "$f" "../rolling/openocd-$arch-linux.tar.gz"
+            (cd ../rolling && sha256sum "openocd-$arch-linux.tar.gz" > "openocd-$arch-linux.tar.gz.sha256")
           done
-          ls -l
+          ls -l . ../rolling
 
-          cat > notes.md <<NOTES
+          cat > ../notes.md <<NOTES
           Automated build of upstream OpenOCD \`$version\`
           ([$UPSTREAM@${SHA:0:12}](https://github.com/$UPSTREAM/commit/$SHA)), built $(date -u +%F).
 
@@ -162,17 +164,51 @@ jobs:
           Requires glibc >= 2.35 and libudev.
 
           \`\`\`sh
-          tar xf openocd-x86_64-linux.tar.gz
+          tar xf openocd-$version-x86_64-linux.tar.gz
           ./openocd-*/bin/openocd -f interface/... -f target/...
           # USB permissions:
           sudo cp openocd-*/share/openocd/contrib/60-openocd.rules /etc/udev/rules.d/
           \`\`\`
 
+          Permanent URL of this build:
+          https://github.com/$GITHUB_REPOSITORY/releases/download/$version/openocd-$version-<arch>-linux.tar.gz
+
           upstream-sha: $SHA
           NOTES
 
+      # One release per version, never deleted: stable URLs for deployment
+      # tools that pin a version.
+      - name: Publish '${{ env.VERSION }}' release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.check.outputs.sha }}
+        run: |
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $VERSION already exists, keeping it."
+            exit 0
+          fi
+          # Point the tag at the upstream commit when GitHub can resolve it in
+          # this fork (shared fork network); fall back to this workflow's commit.
+          # An existing tag (e.g. an upstream release tag) is reused as is.
+          if ! gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" >/dev/null 2>&1; then
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$VERSION" -f sha="$SHA" >/dev/null ||
+              gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$VERSION" -f sha="$GITHUB_SHA" >/dev/null
+          fi
+          # Untagged upstream snapshots are pre-releases; a real upstream
+          # release (vX.Y.Z) becomes a normal release.
+          if [[ "$VERSION" =~ ^v[0-9]+(\.[0-9]+)*$ ]]; then kind=--latest; else kind="--prerelease --latest=false"; fi
+          # shellcheck disable=SC2086
+          gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag $kind \
+            --title "OpenOCD $VERSION" --notes-file notes.md \
+            dist/openocd-*.tar.gz dist/openocd-*.tar.gz.sha256
+
+      - name: Publish '${{ env.RELEASE_TAG }}' release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
           gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
           gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" --prerelease \
-            --title "OpenOCD nightly $version" --notes-file notes.md \
-            openocd-*.tar.gz openocd-*.tar.gz.sha256
+            --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "OpenOCD weekly $VERSION" --notes-file notes.md \
+            dist/openocd-*.tar.gz dist/openocd-*.tar.gz.sha256 \
+            rolling/openocd-*.tar.gz rolling/openocd-*.tar.gz.sha256

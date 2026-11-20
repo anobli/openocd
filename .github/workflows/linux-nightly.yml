@@ -1,0 +1,178 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Periodically build upstream OpenOCD (openocd-org/openocd master) for Linux
+# and publish the result as a rolling "nightly" pre-release of this repository.
+#
+# Scheduled workflows only run from the repository's default branch.
+
+name: OpenOCD Linux nightly
+
+on:
+  schedule:
+    - cron: '17 3 * * *'   # daily; use e.g. '17 3 * * 1' for weekly (Monday)
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Upstream branch, tag or commit SHA to build'
+        default: master
+        type: string
+      force:
+        description: 'Rebuild even if upstream did not change'
+        default: false
+        type: boolean
+
+permissions:
+  contents: write   # create/replace the release
+  actions: write    # keep the schedule from being auto-disabled
+
+concurrency:
+  group: linux-nightly
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: openocd-org/openocd
+  RELEASE_TAG: nightly
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.check.outputs.sha }}
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - name: Resolve upstream revision
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.ref || 'master' }}
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          if [[ "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+            sha=$REF
+          else
+            sha=$(git ls-remote "https://github.com/$UPSTREAM.git" \
+                    "refs/heads/$REF" "refs/tags/$REF^{}" "refs/tags/$REF" |
+                  sort -k2 -r | head -1 | cut -f1)
+          fi
+          [ -n "$sha" ] || { echo "::error::cannot resolve '$REF' in $UPSTREAM"; exit 1; }
+
+          prev=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null |
+                 sed -n 's/^upstream-sha: *\([0-9a-f]*\).*/\1/p' | head -1 || true)
+
+          echo "upstream $REF = $sha, last published = ${prev:-none}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if [ "$sha" != "$prev" ] || [ "$FORCE" = true ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Upstream unchanged, nothing to do." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # GitHub disables scheduled workflows after 60 days without repository
+      # activity; re-enabling through the API resets that timer.
+      - name: Keep schedule alive
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/linux-nightly.yml/enable" || true
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest supported runner image => oldest glibc => widest compatibility.
+          - runner: ubuntu-22.04
+            arch: x86_64
+          - runner: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake libtool pkg-config \
+            cmake texinfo libudev-dev patchelf curl git
+
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+        with:
+          path: ci
+          sparse-checkout: .github/scripts
+
+      - name: Checkout upstream OpenOCD
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ needs.check.outputs.sha }}
+          path: openocd
+          fetch-depth: 0      # full history + tags for 'git describe'
+          filter: blob:none
+
+      - name: Cache dependency tarballs
+        uses: actions/cache@v4
+        with:
+          path: work/downloads
+          key: deps-${{ hashFiles('ci/.github/scripts/build-linux-bundle.sh') }}
+
+      - name: Build
+        run: ci/.github/scripts/build-linux-bundle.sh openocd work
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openocd-${{ matrix.arch }}-linux
+          path: |
+            work/openocd-*.tar.gz
+            work/openocd-*.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish '${{ env.RELEASE_TAG }}' release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.check.outputs.sha }}
+        run: |
+          cd dist
+          version=$(ls openocd-*-x86_64-linux.tar.gz | sed -E 's/^openocd-(.*)-x86_64-linux\.tar\.gz$/\1/')
+          # Also provide stable file names, so that
+          #   .../releases/download/nightly/openocd-<arch>-linux.tar.gz
+          # always points at the latest build.
+          for f in openocd-*-linux.tar.gz; do
+            arch=$(echo "$f" | sed -E 's/.*-([^-]+)-linux\.tar\.gz$/\1/')
+            cp "$f" "openocd-$arch-linux.tar.gz"
+            sha256sum "openocd-$arch-linux.tar.gz" > "openocd-$arch-linux.tar.gz.sha256"
+          done
+          ls -l
+
+          cat > notes.md <<NOTES
+          Automated build of upstream OpenOCD \`$version\`
+          ([$UPSTREAM@${SHA:0:12}](https://github.com/$UPSTREAM/commit/$SHA)), built $(date -u +%F).
+
+          Self-contained bundles: libusb, hidapi, libftdi and libjaylink are shipped in \`lib/\`.
+          Requires glibc >= 2.35 and libudev.
+
+          \`\`\`sh
+          tar xf openocd-x86_64-linux.tar.gz
+          ./openocd-*/bin/openocd -f interface/... -f target/...
+          # USB permissions:
+          sudo cp openocd-*/share/openocd/contrib/60-openocd.rules /etc/udev/rules.d/
+          \`\`\`
+
+          upstream-sha: $SHA
+          NOTES
+
+          gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "OpenOCD nightly $version" --notes-file notes.md \
+            openocd-*.tar.gz openocd-*.tar.gz.sha256
